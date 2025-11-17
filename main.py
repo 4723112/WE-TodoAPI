@@ -1,88 +1,70 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, validator
-from typing import List, Optional
+from pydantic import BaseModel
+from typing import List , Optional
 from datetime import datetime
+
+
+from tortoise import fields
+from tortoise.contrib.fastapi import register_tortoise
+from tortoise.contrib.pydantic import pydantic_model_creator
+from models import TodoItem
 
 app = FastAPI(title="TODO API", description="TODOリスト管理API", version="1.0.0")
 
-# TODOアイテムモデルの定義
-class TodoItem(BaseModel):
-    id: int
-    title: str # TODOアイテムのタイトル（e.g. "牛乳とパンを買う"）
-    description: Optional[str] = None # TODOアイテムの補足説明（e.g. "牛乳は低温殺菌じゃないとだめ）
-    completed: bool = False # TODOアイテムの完了状態（e.g. True: 完了, False: 未完了）
+TodoItem_Pydantic = pydantic_model_creator(TodoItem)
+TodoItemCreate_Pydantic = pydantic_model_creator(TodoItem, exclude=("id","completed"))
+TodoItemUpdate_Pydantic = pydantic_model_creator(TodoItem, exclude=("id",))
 
-#11/10追加
-class TodoItemUpdateScheme(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    completed: Optional[bool] = None
-#11/10追加ここまで
+register_tortoise(
+    app,
+    db_url="sqlite://db.sqlite3",
+    modules={"models":["models"]},
+    generate_schemas=True,
+    add_exception_handlers=True,
+    )
 
-# メモリ上のTODOリスト （データベースの代わりとして使用、サーバが停止するとデータが消える）
-todos = [
-    TodoItem(id=1, title="牛乳とパンを買う", description="牛乳は低温殺菌じゃないとだめ", completed=False),
-    TodoItem(id=2, title="Pythonの勉強", description="30分勉強する", completed=True),
-    TodoItem(id=3, title="30分のジョギング", description="", completed=False),
-    TodoItem(id=4, title="技術書を読む", description="", completed=False),
-    TodoItem(id=5, title="夕食の準備", description="カレーを作る", completed=True)
-]
 
 @app.get("/")
 def read_root():
     return {"message": "TODO APIへようこそ！"}
 
 # すべてのTODOを取得
-@app.get("/todos", response_model=List[TodoItem])
-def get_all_todos(query: Optional[str] = None):
-    if query:
-        results: List[TodoItem] = []
-        for todo in todos:
-            if query.lower() in todo.title or query.lower() in todo.description:
-                results.append(todo)
-        return results
-    else:
-        return todos
+@app.get("/todos", response_model=List[TodoItem_Pydantic])
+async def get_all_todos():
+    todos = await TodoItem.all()
+    return todos
 
 # 特定のTODOを取得
-@app.get("/todos/{todo_id}", response_model=TodoItem)
-def get_todo(todo_id: int):
-    for todo in todos:
-        if todo.id == todo_id:
-            return todo
-    raise HTTPException(status_code=404, detail="TODOが見つからない")
+@app.get("/todos/{todo_id}", response_model=TodoItem_Pydantic)
+async def get_todo(todo_id: int):
+    todo = await TodoItem.get(id=todo_id)
+    if todo:
+        return todo
+    raise HTTPException(status_code=404, detail=f"ID {todo_id} のTODOが見つかりません")
 
 #11/10追加
-@app.post("/todos", response_model=TodoItem)
-def create_todo(req: TodoItemUpdateScheme): # <--リクエストボディのデータを受け取る
-    # 送られてきたIDは無視して、新しいIDを作成
-    new_id = max([todo.id for todo in todos], default=0) + 1
-    # IDをつけて新しいTODOアイテムを作成
-    new_todo = TodoItem(id=new_id, title=req.title, description=req.description, completed=False)
-    # todosリストに追加する処理
-    todos.append(new_todo)
-
+@app.post("/todos", response_model=TodoItem_Pydantic)
+async def create_todo(res: TodoItemCreate_Pydantic): # <--リクエストボディのデータを受け取る
+    new_todo = await TodoItem.create(title=res.title, description=res.description)
     return new_todo # 追加したTODOアイテムを返す
 
 @app.delete("/todos/{todo_id}")
-def delete_todo(todo_id: int):
-    for i, todo in enumerate(todos):
-        if todo.id == todo_id:
-            deleted_todo = todos.pop(i)
-            return {"message": f"TODO '{deleted_todo.description}' を削除しました"}
-
+async def delete_todo(todo_id: int):
+    todo = await TodoItem.get(id=todo_id)
+    if todo:
+        await todo.delete()
+        return {"message": f"TODO '{todo.title}' を削除しました"}
     raise HTTPException(status_code=404, detail=f"ID {todo_id} のTODOが見つかりません")
 
 # PUTエンドポイントの実装
-@app.put("/todos/{todo_id}", response_model=TodoItem) # idはパスパラメータで取得
-def update_todo(todo_id: int, req: TodoItemUpdateScheme): # リクエストボディの検証モデルを指定
-    for i, todo in enumerate(todos):
-        if todo.id == todo_id:
-            todos[i] = TodoItem(
-                id=todo_id,
-                title=req.title if req.title is not None else todo.title,
-                description=req.description if req.description is not None else todo.description,
-                completed=req.completed if req.completed is not None else todo.completed
-            )
-            return todos[i]
-    raise HTTPException(status_code=404, detail=f"ID {todo_id} のTODOが見つかりません")
+@app.put("/todos/{todo_id}", response_model=TodoItem_Pydantic)
+async def update_todo(todo_id: int, req: TodoItemUpdate_Pydantic):
+    todo = await TodoItem.get(id=todo_id)
+    if not todo:
+        raise HTTPException(status_code=404, detail=f"ID {todo_id} のTODOが見つかりません")
+
+    todo.title = req.title if req.title is not None else todo.title
+    todo.description = req.description if req.description is not None else todo.description
+    todo.completed = req.completed if req.completed is not None else todo.completed
+    await todo.save()
+    return todo
